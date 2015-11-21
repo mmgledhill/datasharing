@@ -1,0 +1,247 @@
+---
+title: "Weight Lifting Prediction"
+author: "mmgledhill"
+date: "Tuesday, November 10, 2015"
+output: html_document
+---
+ 
+#Purpose
+The purpose of this study is to determine when someone is lifting correctly by leveraging data collected by their health tracking devices.There are several potential benefits of using sensor data to evaluate if users are lifting correctly. It can help ensure users maximize their health benefits of working out and reduce risk of injury. In addition, it may help reduce need for personal trainers or help trainers to motivate clients to reach their full potential.
+ 
+Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions. The first was exactly according to the specification and other 4 are common mistakes such as throwing the elbows to the front ,lifting the dumbbell only halfway, lowering the dumbbell only halfway, and throwing the hips to the front. See References (1) for more information on the Weight Lifting data set.
+ 
+ 
+```{r getdata, echo=FALSE, cache=TRUE}
+ 
+trainurl = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+ 
+testurl ="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+ 
+download.file(trainurl,"pml-training.csv")
+download.file(testurl,"pml-testing.csv")
+
+```
+ 
+## Examining the Data
+
+Two data sets were provided. One to train or build the model and another to validate against. We had to structure of the training dataset used to develop the model matched the dataset we needed to test it against.
+
+A function was used to help eliminate unnecessary columns that were all NA or blank in both Training and Test datasets. The final training dataset was them limited to the remaining columns in the test dataset.
+
+Initially we tried to keep all columns that might help predict the outcome to get the best accuracy possible. Two columns were eliminated because they caused problems with the model and because after plotting it was found that their relationship to the classe would probably be artificial outside the study. They were: X and cvtd_timestamp. 
+--X factor gave a good fit for the initial model but led to erroneous results on the test data set (all As). This was recommended for removal in the discussion forum here [link](https://class.coursera.org/predmachlearn-034/forum/thread?thread_id=97). 
+--The cvtd_timestamp resulted in many NAs and was determined to not be a factor in lifting technique.  A plot of cvtd_timestamp as numeric shows pattern with classe.   
+ 
+See R markdown for code used to clean the dataset.
+Figures 1 & 2. Classe vs. Problematic Variables (X & cvtd timestamp)
+
+``` {r fixdata, echo=FALSE}
+
+#set #div/0 to NA
+traindata<-read.table("pml-training.csv",sep=",",header=TRUE,na.strings=c("NA","#DIV/0!"))
+
+plot(traindata$X,traindata$classe,main="Lifing Classe vs. X Variable",ylab="Classe",xlab="X Variable")
+
+plot(as.numeric(traindata$cvtd_timestamp),traindata$classe,main="Lifing Classe vs. CVTD Timestamp",ylab="Classe",xlab="CVTD Timestamp")
+
+testdata<-read.table("pml-testing.csv",sep=",",header=TRUE,na.strings=c("NA","#DIV/0!")) 
+
+cleandata<- function(dt) {
+ 
+#convert cvtd_timestamp to epoch date to get rid of date 'factor'
+dt$cvtd_timestamp_epoch<-as.numeric(strptime(dt$cvtd_timestamp,"%m/%d/%Y %R"))
+
+#NAs introduced in timestamp, deleted later till had high accuracy
+dt<-subset(dt,select=-c(cvtd_timestamp,cvtd_timestamp_epoch,X))
+ 
+#find NA columns and remove by column names
+removediv=c()
+for (i in 1:dim(dt)[2]) {
+if (all(is.na(dt[dt[,i]!="",i]))==TRUE){
+    removediv=c(removediv,colnames(dt)[i])
+} #end if
+}# end for
+ 
+dt<-dt[,-which(names(dt) %in% removediv)]
+ 
+return(dt)
+ 
+} #end clean data function
+
+#note there is no classe in test data only problem_id
+traindata<-cleandata(traindata)
+testdata<-cleandata(testdata)
+
+#after this testdata has < columns than train data (154 vs 60)
+#subset to only those columns in the test data set
+traindata=subset(traindata,select=c("classe",colnames(testdata)[grep("problem_id",colnames(testdata),invert=TRUE)]))
+
+maxcol<-dim(traindata)[2]
+
+#need to get train and test data to havethe same column classes for predict
+traindata[,7:maxcol]<-sapply(traindata[,7:maxcol],as.numeric)
+testdata[,6:maxcol-1]<-sapply(testdata[,6:maxcol-1],as.numeric)
+
+#adjust levels for new window factor
+levels(testdata$new_window)<-levels(traindata$new_window)
+```
+ 
+###Additional Variable Elimination
+
+Columns with near zero variation were eliminated using the caret package; since they will not be good predictors of performance.
+
+Correlation was considered as a means to reduce the number of predictors but was deemed not necessary once we limited the columns to those in the test set; and used the Random Forest method for building the model.
+
+ 
+```{r selectvar, echo=FALSE,cache=TRUE}
+# do for predictors only so that our response doesn't get removed
+library(caret)
+predvar<-subset(traindata,select=-classe)
+responvar<-subset(traindata,select=classe)   
+nullvar<-nearZeroVar(predvar)
+predvar<-predvar[,-nullvar]
+traindatanew<-data.frame(predvar,responvar)
+#highcor<-findCorrelation(predvar,cutoff=.75)
+#predvar<-predvar[,-na.omit(highcor)]
+ 
+```
+ 
+### Explore Variables
+
+Here is an example plot of the data showing the complex relationships of the variables.  
+
+Figure 3. Feature Plot (Dumbbell Only)  
+
+``` {r exploredata,echo=FALSE,cache=TRUE,fig.height=10,fig.width=10}
+ 
+#from paper euler angles and noneuleR: accelerometer,gyroscope,magnetometer
+#measures<-c("roll","pitch","yaw","accel","gyros","magnet")
+#sensors<-c("belt","forearm","dumbbell","arm")
+#calcs<-c("avg","var","stddev","max","min","amplitude","kurtosis","skewness")
+
+#beltvar<-colnames(traindatanew)[grep("belt",colnames(traindatanew))]
+#armsvar<-colnames(traindatanew)[grep("_arm",colnames(traindatanew))]
+#forearmsvar <- colnames(traindatanew)[grep("forearm",colnames(traindatanew))]
+dumbbellvar<- colnames(traindatanew)[grep("dumbbell",colnames(traindatanew))]
+
+#plot of belt variables
+#featurePlot(x=traindatanew[,beltvar],y=as.numeric(traindatanew$classe),plot="pairs",col=traindata$classe)
+#plot of arm variables
+#featurePlot(x=traindatanew[,armsvar],y=as.numeric(traindatanew$classe),plot="pairs",col=traindata$classe)
+#plot of dumbell
+featurePlot(x=traindatanew[,dumbbellvar],y=as.numeric(traindatanew$classe),plot="pairs",col=traindata$classe)
+#plot of forearm
+ #featurePlot(x=traindatanew[,forearmsvar],y=as.numeric(traindatanew$classe),plot="pairs",col=traindata$classe)
+ 
+```
+
+
+###Model Selection
+
+The problem we are trying to solve is classification. From Coursera class "Practical Machine Learning", we learned that Random Forests and Boosting have proved to be very good at classification. Other models were attempted but were abandoned due to poor accuracy. The benefit of Random Forests is improved accuracy but at cost of interpretability, speed and potential overfitting.  
+
+In general, the Random Forest method:  
+ - Bootstrap = random subsamples  
+ - At each node, bootstrap other variables to pick path down tree  
+ - Average result  
+
+Several other models were considered, but abandoned due to poor accuracy.
+
+###Cross Validation
+In order to test our model independent of the final test set, we can build a train/test set within our training data using data partitions. 
+
+For cross validation purposes we took a random sample of 60% the data to train the dataset on and then use the other 40% to test it on.  
+
+The model was tuned to show the estimate the number of variables that should be randomly sampled as candidates each split (mtry). The graph is not shown to limit the number of figures. See rmarkdown for full code. 
+
+```{r crossvalidate, echo=FALSE, results="hide",cache=TRUE}
+
+library(e1071)
+library(randomForest)
+set.seed(333)
+
+data<-traindatanew
+
+inTrain<-createDataPartition(y=data$classe,p=.6,list=FALSE)
+
+cvtraining<-data[inTrain,]
+cvtesting<-data[-inTrain,]
+
+cvmtry<-tuneRF(subset(cvtraining,select=-c(classe)),cvtraining$classe,ntreeTry=5,stepFactor=1.5,improve=.01,trace=TRUE,plot=FALSE,dobest=FALSE)
+
+cvrffit<-randomForest(classe~.,data=cvtraining,mtry=15,ntree=5,importance=TRUE,trace=TRUE)
+
+cvpred<-predict(cvrffit,cvtesting)
+
+cvest<-data.frame(actual=cvtesting$classe,pred=cvpred)
+cvest$miss=0
+cvest$miss[cvest$actual!=cvest$pred]=1
+
+cvout = sum(cvest$miss)/dim(cvest)[1]
+
+```
+  
+Model:
+```{r printmodelcv,echo=FALSE}
+print(cvrffit$call)
+```
+
+The Cross-Validation showed an Out-of-Sample error rate of only `r round(cvout*100,2)`%. With a test set of 20 samples we would expect to have 0 mis-classified (which is what we got)!
+
+The cross-validated model on the training subset helped validate that we have the right parameters/method.
+
+###Final Model
+
+For final model, we used all data to ensure that we could get the best prediction on the final test set.  
+
+Figure 4: Final Model - # Variables to Randomly Sample eAch Split (Mtry) Results Using all Train Data    
+
+```{r finalmodel, echo=FALSE,cache=TRUE,results="hide"}
+
+library(e1071)
+library(randomForest)
+set.seed(333)
+
+bestmtry<-tuneRF(subset(traindatanew,select=-c(classe)),traindatanew$classe,ntreeTry=5,stepFactor=1.5,improve=.01,trace=TRUE,plot=TRUE,dobest=FALSE)
+
+rffit<-randomForest(classe~.,data=traindatanew,mtry=33,ntree=5,importance=TRUE,trace=TRUE)
+
+prf<-predict(rffit,testdata)
+
+```
+Model: 
+```{r printfinal, echo=FALSE}
+print(rffit$call)
+```
+
+
+###Important Factors
+Using the 'mean decrease in accuracy' the most important factors in the final model appear to be:
+```{r varimp,echo=FALSE,cache=TRUE}
+impvar<-importance(rffit,type=1)
+sortimp<-impvar[order(impvar[,1],decreasing=TRUE),]
+print(data.frame(Mean_Decrease_in_Accuracy=head(sortimp,10)))
+
+```
+Removing these variables would decrease the accuracy of the model the most. For a more interpretable model, these could be ran through another model to understand their relationships.  This 'Random Forest' model does not take into account correlation between the factors so highly-correlated items may be getting a higher score as found in Andrew Landgraf's blog found [here](http://alandgraf.blogspot.com/2012/07/random-forest-variable-importance.html). In addition, there are probably additional opportunities to remove other time/window based variables if they will not be available outside test simulations.
+
+```{r testans,echo=FALSE,cache=TRUE}
+
+answers=prf
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+
+ 
+```
+ 
+ 
+## References
+(1) Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
